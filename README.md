@@ -287,9 +287,10 @@ if __name__ == "__main__":
     root.protocol("WM_DELETE_WINDOW", app.close)
     root.mainloop()
 
-## FIM.py
+### FIM.py
 
-```python
+```bash
+python
 import os
 import hashlib
 import time
