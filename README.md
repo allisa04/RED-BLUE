@@ -290,297 +290,361 @@ if __name__ == "__main__":
 ### FIM.py
 
 ```bash
-python
-import os
-import hashlib
-import time
+
+import os, time, hashlib, shutil, threading, csv
 from datetime import datetime
-import shutil
-import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-from collections import Counter
 
-LAB_ROOT_DIR = os.path.abspath('.')
+BASE_DIR = os.path.abspath(".")
+LOG_DIR = "logs"
 BACKUP_DIR = "backups"
-HASH_DB = "logs/fim_hashes.txt"
-ALERT_LOG = "logs/fim_alerts.txt"
+HASH_DB = os.path.join(LOG_DIR, "fim_hashes.txt")
+ALERT_LOG = os.path.join(LOG_DIR, "fim_alerts.txt")
+DEMO_FILE = os.path.join(BASE_DIR, "demo_file.txt")
 
-os.makedirs("logs", exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
+
+
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def get_hash(path):
     try:
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()
-    except Exception:
+    except:
         return None
+
+
+def backup_name(path):
+    return os.path.join(BACKUP_DIR, os.path.relpath(path, BASE_DIR).replace(os.sep, "_"))
+
+
+def backup_file(path):
+    try:
+        shutil.copy2(path, backup_name(path))
+    except:
+        pass
+
+
+def restore_file(path):
+    src = backup_name(path)
+
+    if not os.path.exists(src):
+        return "No backup available."
+
+    try:
+        shutil.copy2(src, path)
+        return "File restored successfully."
+    except:
+        return "Restore failed."
+
 
 def load_hashes():
     if not os.path.exists(HASH_DB):
         return {}
 
-    hashes = {}
-    with open(HASH_DB) as f:
-        for line in f.read().splitlines():
+    data = {}
+    with open(HASH_DB, "r", encoding="utf-8") as f:
+        for line in f:
             try:
-                path, h = line.split(" || ")
-                hashes[path] = h
-            except Exception:
-                continue
-    return hashes
+                path, h = line.strip().split(" || ")
+                data[path] = h
+            except:
+                pass
+    return data
 
-def save_hashes(hashes):
-    with open(HASH_DB, 'w') as f:
-        for path, h in hashes.items():
+
+def save_hashes(data):
+    with open(HASH_DB, "w", encoding="utf-8") as f:
+        for path, h in data.items():
             f.write(f"{path} || {h}\n")
 
-def log_alert(event, path):
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {event.upper()}: {path}"
-    with open(ALERT_LOG, 'a') as f:
-        f.write(line + "\n")
-    return line
 
-def backup_file(path):
-    backup_path = os.path.join(
-        BACKUP_DIR,
-        os.path.relpath(path, LAB_ROOT_DIR).replace(os.sep, "_")
-    )
-    try:
-        shutil.copy2(path, backup_path)
-    except Exception:
-        pass
-
-def restore_file(path):
-    backup_path = os.path.join(
-        BACKUP_DIR,
-        os.path.relpath(path, LAB_ROOT_DIR).replace(os.sep, "_")
-    )
-
-    if not os.path.exists(backup_path):
-        return "No backup available for this file."
-
-    try:
-        shutil.copy2(backup_path, path)
-        return f"Restored: {path} from backup"
-    except Exception:
-        return "Failed to restore: admin rights or locked file."
-
-def initial_backup(files):
-    for path in files:
-        backup_file(path)
-
-def get_event_counts():
-    if not os.path.exists(ALERT_LOG):
-        return Counter()
-
-    events = []
-    with open(ALERT_LOG) as f:
-        for line in f:
-            if ":" in line:
-                event_type = line.split("]")[1].split(":")[0].strip()
-                file = ":".join(line.split(":")[2:]).strip()
-                events.append((event_type, file))
-
-    return Counter(events)
+def write_log(event, path):
+    with open(ALERT_LOG, "a", encoding="utf-8") as f:
+        f.write(f"[{now()}] {event}: {path}\n")
 
 
 class FIMApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("File Integrity Monitor - Modern SOC Dashboard")
-        self.root.geometry("1250x650")
+        self.root.title("FIM - File Integrity Monitor")
+        self.root.geometry("1180x700")
+        self.root.configure(bg="#0f172a")
 
-        style = ttk.Style(self.root)
-        style.theme_use("clam")
+        self.running = False
+        self.last_state = {}
+        self.selected_folder = tk.StringVar(value=BASE_DIR)
 
-        title = tk.Label(
-            root,
-            text="Real-Time File Integrity Dashboard",
-            font=("Segoe UI", 22, "bold"),
-            fg="#1976d2"
-        )
-        title.pack(pady=(14, 7))
+        self.vars = {
+            "status": tk.StringVar(value="Stopped"),
+            "files": tk.StringVar(value="0"),
+            "added": tk.StringVar(value="0"),
+            "modified": tk.StringVar(value="0"),
+            "deleted": tk.StringVar(value="0"),
+            "total": tk.StringVar(value="0"),
+            "filter": tk.StringVar(value="All Changes")
+        }
 
-        subtitle = tk.Label(
-            root,
-            text="Monitoring file changes: added, modified, and deleted files.",
-            font=("Segoe UI", 12),
-            fg="#6d6d6d"
-        )
-        subtitle.pack(pady=(0, 6))
+        self.setup_style()
+        self.build_ui()
 
-        columns = ("Time", "Event", "File")
-        self.tree = ttk.Treeview(root, columns=columns, show="headings", height=24)
+    def setup_style(self):
+        s = ttk.Style()
+        s.theme_use("clam")
+        s.configure("Treeview", background="#111827", foreground="#e5e7eb", fieldbackground="#111827", rowheight=30)
+        s.configure("Treeview.Heading", background="#1f2937", foreground="white", font=("Segoe UI", 9, "bold"))
+        s.map("Treeview", background=[("selected", "#2563eb")])
 
-        for col in columns:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, anchor=tk.CENTER if col == "Time" else tk.W)
+    def build_ui(self):
+        side = tk.Frame(self.root, bg="#020617", width=210)
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
 
-        self.tree.column("Time", width=170)
-        self.tree.column("Event", width=110)
-        self.tree.column("File", width=950)
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=8)
+        main = tk.Frame(self.root, bg="#0f172a")
+        main.pack(side="right", fill="both", expand=True)
 
-        button_frame = tk.Frame(root)
-        button_frame.pack(pady=(10, 8))
+        tk.Label(side, text="🛡  FIM", bg="#020617", fg="white", font=("Segoe UI", 20, "bold")).pack(anchor="w", padx=20, pady=(25, 2))
+        tk.Label(side, text="File Integrity Monitor", bg="#020617", fg="#94a3b8").pack(anchor="w", padx=23, pady=(0, 25))
 
-        tk.Button(button_frame, text="View Full Logs", command=self.view_logs, width=17).pack(side=tk.LEFT, padx=8)
-        tk.Button(button_frame, text="Clear Table", command=self.clear_table, width=17).pack(side=tk.LEFT, padx=8)
-        tk.Button(button_frame, text="Export Report", command=self.export_report, width=17, bg="#388e3c", fg="white").pack(side=tk.LEFT, padx=8)
-        tk.Button(button_frame, text="Restore Selected File", command=self.restore_selected, width=19, bg="#0d47a1", fg="white").pack(side=tk.LEFT, padx=8)
-        tk.Button(button_frame, text="Show Analytics", command=self.show_analytics, width=16, bg="#ff9800", fg="white").pack(side=tk.LEFT, padx=8)
+        for item in ["Dashboard", "Baseline Scan", "Detected Changes", "Logs"]:
+            active = item == "Dashboard"
+            tk.Label(side, text=f"   {item}", bg="#1d4ed8" if active else "#020617",
+                     fg="white" if active else "#cbd5e1", anchor="w", pady=11).pack(fill="x", padx=12, pady=2)
+
+        box = tk.Frame(side, bg="#052e16", highlightbackground="#14532d", highlightthickness=1)
+        box.pack(side="bottom", fill="x", padx=14, pady=16)
+        tk.Label(box, textvariable=self.vars["status"], bg="#052e16", fg="#22c55e", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(12, 3))
+        tk.Label(box, text="Real-time file monitoring", bg="#052e16", fg="#bbf7d0", font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(0, 12))
+
+        header = tk.Frame(main, bg="#0f172a")
+        header.pack(fill="x", padx=22, pady=(20, 10))
+
+        title = tk.Frame(header, bg="#0f172a")
+        title.pack(side="left")
+        tk.Label(title, text="File Integrity Dashboard", bg="#0f172a", fg="white", font=("Segoe UI", 22, "bold")).pack(anchor="w")
+        tk.Label(title, text="Detects added, modified, and deleted files using SHA-256 hashes.", bg="#0f172a", fg="#94a3b8").pack(anchor="w")
+
+        buttons = tk.Frame(header, bg="#0f172a")
+        buttons.pack(side="right")
+        self.btn(buttons, "Create Baseline", self.create_baseline, "#1d4ed8").pack(side="left", padx=5)
+        self.btn(buttons, "▶ Start", self.start, "#166534").pack(side="left", padx=5)
+        self.btn(buttons, "■ Stop", self.stop, "#991b1b").pack(side="left", padx=5)
+        self.btn(buttons, "Export Logs", self.export_logs, "#334155").pack(side="left", padx=5)
+
+        folder = tk.Frame(main, bg="#111827", highlightbackground="#1e293b", highlightthickness=1)
+        folder.pack(fill="x", padx=22, pady=(0, 10))
+
+        tk.Label(folder, text="Monitored Folder:", bg="#111827", fg="#94a3b8").pack(side="left", padx=12)
+        tk.Entry(folder, textvariable=self.selected_folder, bg="#020617", fg="white", relief="flat", width=80).pack(side="left", padx=8, pady=10, ipady=5)
+        self.btn(folder, "Browse", self.choose_folder, "#334155").pack(side="left", padx=5)
+
+        cards = tk.Frame(main, bg="#0f172a")
+        cards.pack(fill="x", padx=22, pady=10)
+
+        for label, key, color in [
+            ("Baseline Files", "files", "#38bdf8"),
+            ("Added", "added", "#22c55e"),
+            ("Modified", "modified", "#facc15"),
+            ("Deleted", "deleted", "#f87171"),
+            ("Total Changes", "total", "#c084fc")
+        ]:
+            self.card(cards, label, self.vars[key], color).pack(side="left", fill="x", expand=True, padx=5)
+
+        panel = tk.Frame(main, bg="#111827", highlightbackground="#1e293b", highlightthickness=1)
+        panel.pack(fill="both", expand=True, padx=22, pady=(8, 10))
+
+        top = tk.Frame(panel, bg="#111827")
+        top.pack(fill="x", padx=14, pady=(12, 8))
+
+        tk.Label(top, text="DETECTED FILE CHANGES", bg="#111827", fg="white", font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Combobox(top, textvariable=self.vars["filter"], values=["All Changes", "Added", "Modified", "Deleted", "Restored"],
+                     state="readonly", width=18).pack(side="right")
+
+        cols = ("time", "event", "file", "hash")
+        self.table = ttk.Treeview(panel, columns=cols, show="headings", height=17)
+
+        for col, head in zip(cols, ("Time", "Event", "File Path", "SHA-256 Hash")):
+            self.table.heading(col, text=head)
+            self.table.column(col, width=130, anchor="center")
+
+        self.table.column("file", width=470, anchor="w")
+        self.table.column("hash", width=300, anchor="w")
+
+        for tag, color in [("Added", "#22c55e"), ("Modified", "#facc15"), ("Deleted", "#f87171"), ("Restored", "#38bdf8")]:
+            self.table.tag_configure(tag, foreground=color)
+
+        self.table.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+
+        bottom = tk.Frame(main, bg="#0f172a")
+        bottom.pack(fill="x", padx=22, pady=(0, 14))
+
+        self.btn(bottom, "Create Test File", self.demo_create, "#166534").pack(side="left", padx=4)
+        self.btn(bottom, "Modify Test File", self.demo_modify, "#92400e").pack(side="left", padx=4)
+        self.btn(bottom, "Delete Test File", self.demo_delete, "#991b1b").pack(side="left", padx=4)
+        self.btn(bottom, "View Logs", self.view_logs, "#334155").pack(side="left", padx=4)
+        self.btn(bottom, "Clear Table", self.clear_table, "#334155").pack(side="left", padx=4)
+        self.btn(bottom, "Restore Selected", self.restore_selected, "#1d4ed8").pack(side="left", padx=4)
+
+    def btn(self, parent, text, cmd, color):
+        return tk.Button(parent, text=text, command=cmd, bg=color, fg="white", relief="flat",
+                         padx=14, pady=8, font=("Segoe UI", 9, "bold"), cursor="hand2")
+
+    def card(self, parent, title, var, color):
+        box = tk.Frame(parent, bg="#111827", highlightbackground="#1e293b", highlightthickness=1)
+        tk.Label(box, text=title, bg="#111827", fg="#94a3b8").pack(anchor="w", padx=15, pady=(13, 3))
+        tk.Label(box, textvariable=var, bg="#111827", fg=color, font=("Segoe UI", 20, "bold")).pack(anchor="w", padx=15, pady=(0, 12))
+        return box
+
+    def choose_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.selected_folder.set(folder)
+
+    def scan_files(self):
+        folder = self.selected_folder.get()
+        data = {}
+
+        for rootdir, _, files in os.walk(folder):
+            if LOG_DIR in rootdir or BACKUP_DIR in rootdir:
+                continue
+
+            for name in files:
+                path = os.path.join(rootdir, name)
+                h = get_hash(path)
+                if h:
+                    data[path] = h
+
+        return data
+
+    def create_baseline(self):
+        self.last_state = self.scan_files()
+        save_hashes(self.last_state)
+
+        for path in self.last_state:
+            backup_file(path)
+
+        self.vars["files"].set(str(len(self.last_state)))
+        messagebox.showinfo("FIM", f"Baseline created.\nFiles recorded: {len(self.last_state)}")
+
+    def start(self):
+        if self.running:
+            return messagebox.showinfo("FIM", "Monitoring is already running.")
+
+        if not self.last_state:
+            self.last_state = load_hashes() or self.scan_files()
+            save_hashes(self.last_state)
 
         self.running = True
-        self.reported_events = set()
-        threading.Thread(target=self.monitor_thread, daemon=True).start()
+        self.vars["status"].set("Monitoring")
+        threading.Thread(target=self.monitor, daemon=True).start()
 
-    def monitor_thread(self):
-        previous_hashes = load_hashes()
+    def stop(self):
+        self.running = False
+        self.vars["status"].set("Stopped")
 
+    def monitor(self):
         while self.running:
-            current_hashes = {}
-            monitored_files = []
+            new_state = self.scan_files()
 
-            for rootdir, _, files in os.walk(LAB_ROOT_DIR):
-                for file in files:
-                    fpath = os.path.join(rootdir, file)
+            for path in self.last_state:
+                if path not in new_state:
+                    self.report("Deleted", path, "N/A")
 
-                    if BACKUP_DIR in rootdir or fpath.endswith(HASH_DB) or fpath.endswith(ALERT_LOG):
-                        continue
-
-                    h = get_hash(fpath)
-
-                    if h:
-                        current_hashes[fpath] = h
-                        monitored_files.append(fpath)
-
-            if not os.listdir(BACKUP_DIR):
-                initial_backup(monitored_files)
-
-            for path in previous_hashes:
-                if path not in current_hashes:
-                    self.report_event("deleted", "Deleted", path)
-
-            for path in previous_hashes:
-                if path in current_hashes and current_hashes[path] != previous_hashes[path]:
-                    self.report_event("modified", "Modified", path)
+            for path, h in new_state.items():
+                if path not in self.last_state:
                     backup_file(path)
-
-            for path in current_hashes:
-                if path not in previous_hashes:
-                    self.report_event("added", "Added", path)
+                    self.report("Added", path, h)
+                elif self.last_state[path] != h:
                     backup_file(path)
+                    self.report("Modified", path, h)
 
-            save_hashes(current_hashes)
-            previous_hashes = dict(current_hashes)
-            time.sleep(1.5)
+            self.last_state = dict(new_state)
+            save_hashes(new_state)
+            self.root.after(0, lambda: self.vars["files"].set(str(len(new_state))))
+            time.sleep(1)
 
-    def report_event(self, key_name, event_name, path):
-        event_id = f"{key_name}:{path}"
+    def report(self, event, path, h):
+        short_hash = h[:32] + "..." if h != "N/A" else "N/A"
+        write_log(event, path)
+        self.root.after(0, self.add_row, (now(), event, path, short_hash), event)
 
-        if event_id in self.reported_events:
+    def add_row(self, row, event):
+        mode = self.vars["filter"].get()
+        if mode != "All Changes" and mode != event:
             return
 
-        log_alert(event_name, path)
-        self.add_event(event_name, path)
-        self.reported_events.add(event_id)
+        self.table.insert("", 0, values=row, tags=(event,))
+        self.vars["total"].set(str(int(self.vars["total"].get()) + 1))
 
-    def add_event(self, event, file):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.tree.insert("", 0, values=(timestamp, event, file), tags=(event,))
+        if event == "Added":
+            self.vars["added"].set(str(int(self.vars["added"].get()) + 1))
+        elif event == "Modified":
+            self.vars["modified"].set(str(int(self.vars["modified"].get()) + 1))
+        elif event == "Deleted":
+            self.vars["deleted"].set(str(int(self.vars["deleted"].get()) + 1))
 
-        self.tree.tag_configure("Deleted", foreground="#e53935")
-        self.tree.tag_configure("Modified", foreground="#ffb300")
-        self.tree.tag_configure("Added", foreground="#43a047")
-        self.tree.tag_configure("Restored", foreground="#1976d2")
+    def demo_create(self):
+        with open(DEMO_FILE, "w", encoding="utf-8") as f:
+            f.write(f"Demo file created at {now()}\n")
+
+    def demo_modify(self):
+        with open(DEMO_FILE, "a", encoding="utf-8") as f:
+            f.write(f"Modified at {now()}\n")
+
+    def demo_delete(self):
+        if os.path.exists(DEMO_FILE):
+            os.remove(DEMO_FILE)
+        else:
+            messagebox.showinfo("FIM", "Demo file does not exist yet. Click Create Test File first.")
 
     def clear_table(self):
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+        self.table.delete(*self.table.get_children())
+        for key in ["added", "modified", "deleted", "total"]:
+            self.vars[key].set("0")
 
     def view_logs(self):
-        if not os.path.exists(ALERT_LOG):
-            messagebox.showinfo("Logs", "No logs file found.")
-            return
-
-        window = tk.Toplevel(self.root)
-        window.title("Complete FIM Alert Log")
-
-        txt = scrolledtext.ScrolledText(
-            window,
-            wrap=tk.WORD,
-            height=30,
-            width=120,
-            font=("Consolas", 10)
-        )
+        win = tk.Toplevel(self.root)
+        win.title("FIM Logs")
+        txt = scrolledtext.ScrolledText(win, wrap=tk.WORD, height=30, width=120, font=("Consolas", 10))
         txt.pack()
 
-        with open(ALERT_LOG, 'r') as f:
-            logs = f.read()
+        if os.path.exists(ALERT_LOG):
+            with open(ALERT_LOG, "r", encoding="utf-8") as f:
+                txt.insert(tk.END, f.read() or "No logs yet.")
+        else:
+            txt.insert(tk.END, "No logs yet.")
 
-        txt.insert(tk.END, logs if logs else "No logs yet.")
-
-    def export_report(self):
-        if not os.path.exists(ALERT_LOG):
-            messagebox.showinfo("Export Report", "No logs to export.")
+    def export_logs(self):
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV File", "*.csv")])
+        if not path:
             return
 
-        export_path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")],
-            title="Export Report As"
-        )
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Time", "Event", "File Path", "SHA-256 Hash"])
+            for item in self.table.get_children():
+                writer.writerow(self.table.item(item)["values"])
 
-        if not export_path:
-            return
-
-        with open(ALERT_LOG, 'r') as f:
-            logs = f.read()
-
-        with open(export_path, 'w') as out_file:
-            out_file.write(logs)
-
-        messagebox.showinfo("Export Successful", f"Report exported to:\n{export_path}")
+        messagebox.showinfo("FIM", "Logs exported successfully.")
 
     def restore_selected(self):
-        selected = self.tree.selection()
+        item = self.table.selection()
+        if not item:
+            return messagebox.showinfo("FIM", "Select a file row first.")
 
-        if not selected:
-            messagebox.showinfo("Restore File", "Please select a file row to restore.")
-            return
-
-        filepath = self.tree.item(selected[0], 'values')[2]
-        result = restore_file(filepath)
-
+        file_path = self.table.item(item[0])["values"][2]
+        result = restore_file(file_path)
         messagebox.showinfo("Restore File", result)
 
-        if result.startswith("Restored"):
-            log_alert("Restored", filepath)
-            self.add_event("Restored", filepath)
+        if result.startswith("File restored"):
+            self.report("Restored", file_path, get_hash(file_path) or "N/A")
 
-    def show_analytics(self):
-        counts = get_event_counts()
-        file_counter = Counter()
-        event_counter = Counter()
-
-        for (event, file), count in counts.items():
-            file_counter[file] += count
-            event_counter[event] += count
-
-        msg = "Top Targeted/Deleted/Modified Files:\n"
-
-        for file, count in file_counter.most_common(5):
-            msg += f"{file} - {count} events\n"
-
-        msg += "\nEvent Summary:\n"
-
-        for event, count in event_counter.most_common():
-            msg += f"{event}: {count}\n"
-
-        messagebox.showinfo("FIM Analytics", msg)
-
-    def on_close(self):
+    def close(self):
         self.running = False
         self.root.destroy()
 
@@ -588,7 +652,7 @@ class FIMApp:
 if __name__ == "__main__":
     root = tk.Tk()
     app = FIMApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_close)
+    root.protocol("WM_DELETE_WINDOW", app.close)
     root.mainloop()
 ```
 
