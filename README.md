@@ -137,21 +137,6 @@ if __name__ == "__main__":
     root.mainloop()
 
 
-
-```
-
-SECLab/
-└── FIM/
-    ├── fim.py
-    ├── logs/
-    │   ├── fim_alerts.txt
-    │   └── fim_hashes.txt
-    └── protected_files/
-        ├── config.txt
-        └── notes.txt
-
-### CREATE logs, protected_Files folder
-
 ## Fim.py
 
 ```bash
